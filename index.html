@@ -1282,7 +1282,7 @@ function classesView(){
     <button class="btn" data-act="newClass">+ New class</button>
     <button class="btn" data-act="addSubject">+ Add subject</button>
     <button class="btn" data-act="dlClassesEx">${ICON.dl} Example CSV</button>
-    ${NATIVE?'':'<button class="btn" data-act="syncOpen">Google Drive sync</button>'}
+    <button class="btn" data-act="syncOpen">Google Drive sync</button>
   </div>`}
   ${groups.map(g=>`<h2 class="grp-h">${g.s?esc(g.s):'No subject'} <span class="dim" style="font-weight:400;font-size:.9rem">${g.list.length} class${g.list.length===1?'':'es'}</span></h2>
     ${g.list.length?`<div class="cls-grid">${g.list.map(c=>{const ex=examsOf(c.id);return `<button class="cls-card" data-act="openClass" data-id="${c.id}"><b>${esc(c.section)}</b><span>${c.students.length} student${c.students.length===1?'':'s'}</span><span>${ex.length} exam${ex.length===1?'':'s'}</span></button>`}).join('')}</div>`:`<p class="dim" style="margin:0 0 14px">No classes yet${past?'':' — upload a CSV or tap “New class”'}.</p>`}`).join('')}
@@ -1658,8 +1658,24 @@ function loadGIS(){
   if(window.google&&google.accounts&&google.accounts.oauth2)return Promise.resolve();
   return new Promise((res,rej)=>{const s=document.createElement('script');s.src='https://accounts.google.com/gsi/client';s.async=true;s.onload=()=>res();s.onerror=()=>rej(new Error('Could not reach Google. Check your internet connection.'));document.head.appendChild(s)});
 }
+/* Phase 3b: native Google sign-in in the Android app (DriveAuth plugin in MainActivity) */
+const DriveAuth=NATIVE?plug('DriveAuth'):null;
+async function nativeToken(interactive){
+  let r;
+  try{r=await DriveAuth.authorize({interactive:!!interactive})}
+  catch(e){const code=String(e&&e.code||''),m=String(e&&e.message||e);
+    if(code==='NEEDS_CONSENT')throw new Error('signin');
+    if(code==='CANCELED'||code==='16'||code==='12501')throw new Error('Sign-in was cancelled.');
+    if(code==='NO_SCOPE'){Sync.needConsent=true;throw new Error('scope')}
+    if(code==='10')throw new Error('Google sign-in isn’t set up for the phone app yet. Add the Android client in Google Cloud (see the setup guide).');
+    if(code==='7'||/network/i.test(m))throw new Error('Could not reach Google. Check your internet connection.');
+    throw new Error('Google sign-in failed ('+(code||'?')+'): '+m)}
+  Sync.needConsent=false;Sync.token=r.accessToken;Sync.tokenExp=Date.now()+50*60*1000;return r.accessToken;
+}
+function nativeDropToken(){if(NATIVE&&Sync.token){try{DriveAuth.clearToken({token:Sync.token})}catch(e){}}}
 async function getToken(interactive){
   if(tokenOk())return Sync.token;
+  if(NATIVE)return nativeToken(interactive);
   if(!interactive)throw new Error('signin');
   if(!Sync.cfg.clientId)throw new Error('noclient');
   await loadGIS();
@@ -1672,9 +1688,9 @@ async function getToken(interactive){
 }
 async function gfetch(url,opt={},retry=true){
   const r=await fetch(url,Object.assign({},opt,{headers:Object.assign({Authorization:'Bearer '+Sync.token},opt.headers||{})}));
-  if(r.status===401){Sync.token=null;throw new Error('signin')}
-  if(r.status===403&&/insufficient/i.test(r.headers.get('www-authenticate')||'')){Sync.token=null;Sync.needConsent=true;throw new Error('scope')}
-  if(r.status===403){const t=await r.clone().text();if(/insufficient authentication scopes|ACCESS_TOKEN_SCOPE_INSUFFICIENT/i.test(t)){Sync.token=null;Sync.needConsent=true;throw new Error('scope')}}
+  if(r.status===401){nativeDropToken();Sync.token=null;throw new Error('signin')}
+  if(r.status===403&&/insufficient/i.test(r.headers.get('www-authenticate')||'')){nativeDropToken();Sync.token=null;Sync.needConsent=true;throw new Error('scope')}
+  if(r.status===403){const t=await r.clone().text();if(/insufficient authentication scopes|ACCESS_TOKEN_SCOPE_INSUFFICIENT/i.test(t)){nativeDropToken();Sync.token=null;Sync.needConsent=true;throw new Error('scope')}}
   if((r.status===429||r.status>=500)&&retry){await new Promise(z=>setTimeout(z,1500));return gfetch(url,opt,false)}
   return r;
 }
@@ -1760,12 +1776,12 @@ function buildLookupIndex(){
 
 /* --- one full sync --- */
 async function runSync(interactive){
-  if(NATIVE){if(interactive)alertBox('Not in the phone app yet',['Google Drive sync for the phone app comes in the next update. For now, sync from the website.'],'warn');return}
   if(Sync.busy)return;if(!navigator.onLine){setSyncStatus('offline');return}
   Sync.busy=true;setSyncStatus('syncing');
   try{
     await getToken(interactive);
-    if(!Sync.cfg.email){try{const u=await gjson(`${GAPI}/oauth2/v3/userinfo`);Sync.cfg.email=u.email||'';saveSyncCfg()}catch(e){}}
+    if(!Sync.cfg.email){try{const u=await gjson(`${GAPI}/oauth2/v3/userinfo`);Sync.cfg.email=u.email||'';saveSyncCfg()}catch(e){}
+      if(!Sync.cfg.email){try{const a=await gjson(`${GAPI}/drive/v3/about?fields=user(emailAddress)`);Sync.cfg.email=(a.user&&a.user.emailAddress)||'';saveSyncCfg()}catch(e){}}}
     persist();
     const root=await ensureRoot();
     // 1) pull + merge
@@ -1773,6 +1789,7 @@ async function runSync(interactive){
     if(DC.dataId){const r=await gfetch(`${GAPI}/drive/v3/files/${DC.dataId}?alt=media`);
       if(r.status===404){DC.dataId=null;saveDC()}else if(r.ok){const remote=await r.json().catch(()=>null);if(mergeLib(remote))reloadActiveExam()}}
     // 2) pictures: upload new/changed, trash deleted
+    try{(await PicDB.keys('')).forEach(k=>{k=String(k);if(!LIB.picMeta[k]&&!LIB.drivePics[k]&&!LIB.tomb['p:'+k]&&LIB.exams[k.split('|')[0]])LIB.picMeta[k]=1})}catch(e){}  // pictures taken before sync existed
     const keys=Object.keys(LIB.picMeta);let up=0;
     for(const k of keys){const dp=LIB.drivePics[k];if(dp&&dp.at>=LIB.picMeta[k])continue;
       const blob=await PicDB.get(k).catch(()=>null);if(!blob)continue;
@@ -1812,18 +1829,18 @@ function reloadActiveExam(){
 }
 function scheduleSync(){
   if(Sync.busy)return;
-  if(NATIVE||!Sync.cfg.auto||!Sync.cfg.clientId||!Sync.cfg.email)return;
-  clearTimeout(Sync.timer);Sync.timer=setTimeout(()=>{if(tokenOk())runSync(false);else setSyncStatus('signin')},4000);
+  if(!Sync.cfg.auto||!Sync.cfg.email||(!NATIVE&&!Sync.cfg.clientId))return;
+  clearTimeout(Sync.timer);Sync.timer=setTimeout(()=>{if(tokenOk()||NATIVE)runSync(false);else setSyncStatus('signin')},4000);
 }
-window.addEventListener('online',()=>{if(tokenOk())runSync(false)});
+window.addEventListener('online',()=>{if(tokenOk()||(NATIVE&&Sync.cfg.email&&Sync.cfg.auto))runSync(false)});
+if(NATIVE)document.addEventListener('visibilitychange',()=>{if(!document.hidden&&Sync.cfg.email&&Sync.cfg.auto)scheduleSync()});
 
 /* --- status chip in the header --- */
 function setSyncStatus(st,text){Sync.status=st;Sync.statusText=text||'';paintSyncChip()}
 function ago(t){if(!t)return 'never';const s=Math.round((Date.now()-t)/1000);if(s<60)return 'just now';if(s<3600)return Math.round(s/60)+' min ago';if(s<86400)return Math.round(s/3600)+' h ago';return new Date(t).toLocaleDateString()}
 function paintSyncChip(){
   const el=$('#syncChip');if(!el)return;
-  if(NATIVE){el.hidden=true;return}
-  const s=Sync.status||(Sync.cfg.email?(tokenOk()?'ok':'signin'):'setup');
+  const s=Sync.status||(Sync.cfg.email?((tokenOk()||NATIVE)?'ok':'signin'):'setup');
   const map={setup:['Set up Drive sync','idle'],signin:['Tap to sync','warn'],syncing:[Sync.statusText||'Syncing…','busy'],ok:['Synced '+ago(Sync.cfg.lastSync),'ok'],error:['Sync problem','bad'],offline:['Offline · will sync later','warn']};
   const [label,kind]=map[s]||map.setup;
   el.className='sync-chip '+kind;el.innerHTML=`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18a5 5 0 0 1-.6-9.96A6 6 0 0 1 18 9a4.5 4.5 0 0 1-.5 9z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg><span>${esc(label)}</span>`;
@@ -1835,30 +1852,31 @@ setInterval(paintSyncChip,30000);
 function openSyncPanel(){
   const c=Sync.cfg,signed=!!c.email,wrong=signed&&c.email.toLowerCase()!==EXPECTED_ACCOUNT;
   openModal(`<div style="display:flex;justify-content:space-between;gap:10px;align-items:start"><div><p class="eyebrow">Google Drive sync</p><h2 style="margin:0">${signed?'Syncing to '+esc(c.email):'Not set up yet'}</h2></div><button class="btn small" data-act="closeModal">Close</button></div>
-    ${NATIVE?'<div class="alert warn" style="margin-top:12px">Drive sync for the phone app comes in the next update. For now, use the website to sync.</div>':''}
     ${wrong?`<div class="alert warn" style="margin-top:12px">Your Score Lookup spreadsheet is in <b>${EXPECTED_ACCOUNT}</b>. Sign out and sign in with that account so the lookup can find your pictures.</div>`:''}
-    <p class="dim" style="max-width:60ch">Classes, scores and scanned pictures are saved to a <b>Bubble Tsek</b> folder in your Google Drive. Open this website on another phone or laptop and sync to see everything there. The app can only see files it made — not the rest of your Drive.</p>
+    <p class="dim" style="max-width:60ch">Classes, scores and scanned pictures are saved to a <b>Bubble Tsek</b> folder in your Google Drive. Sign in with the same Google account on your other phone or laptop to see everything there. The app can only see files it made — not the rest of your Drive.</p>
     <div class="tiles" style="grid-template-columns:repeat(3,minmax(0,1fr));margin:12px 0"><div class="tile"><small>Last sync</small><b style="font-size:1.05rem">${ago(c.lastSync)}</b></div><div class="tile"><small>Classes</small><b style="font-size:1.05rem">${LIB.classes.length}</b></div><div class="tile"><small>Pictures in Drive</small><b style="font-size:1.05rem">${Object.keys(LIB.drivePics).length}</b></div></div>
     ${Sync.err?`<div class="alert bad">Last error: ${esc(Sync.err)}</div>`:''}
     <div class="tgl-row card" style="margin:12px 0"><div><b>Sync automatically</b><p class="help">A few seconds after each change, while you’re signed in.</p></div><button class="tgl ${c.auto?'on':''}" role="switch" aria-checked="${c.auto}" aria-label="Sync automatically" data-act="syncAuto"><i></i></button></div>
-    <details ${c.clientId?'':'open'} style="margin:10px 0"><summary style="cursor:pointer;font-weight:600">Setup: Google Client ID</summary>
+    ${NATIVE?'':`<details ${c.clientId?'':'open'} style="margin:10px 0"><summary style="cursor:pointer;font-weight:600">Setup: Google Client ID</summary>
       <div class="field" style="margin-top:10px"><label for="syncClient">Client ID (from Google Cloud)</label><input class="txt mono" id="syncClient" value="${esc(c.clientId)}" placeholder="1234567890-abc123.apps.googleusercontent.com" autocomplete="off"><p class="help">Paste it once on each device. See the setup guide.</p></div>
-      <button class="btn small" data-act="syncSaveClient" style="margin-top:8px">Save Client ID</button></details>
-    <div class="actions">${signed?'<button class="btn" data-act="syncSignOut">Sign out</button>':'<span></span>'}<button class="btn primary" data-act="syncNow" ${NATIVE?'disabled':''}>${signed?'Sync now':'Sign in with Google & sync'}</button></div>`,{wide:true});
+      <button class="btn small" data-act="syncSaveClient" style="margin-top:8px">Save Client ID</button></details>`}
+    <div class="actions">${signed?'<button class="btn" data-act="syncSignOut">Sign out</button>':'<span></span>'}<button class="btn primary" data-act="syncNow">${signed?'Sync now':'Sign in with Google & sync'}</button></div>`,{wide:true});
 }
 Object.assign(ACT,{
   syncOpen:()=>openSyncPanel(),
-  syncChip:()=>{if(!NATIVE&&Sync.cfg.email&&Sync.cfg.clientId&&Sync.status!=='syncing'&&!tokenOk())runSync(true);else openSyncPanel()},
-  syncNow:()=>{if(!Sync.cfg.clientId){toast('Paste your Google Client ID first.','bad');const d=$('#modal details');if(d)d.open=true;return}closeModal();runSync(true)},
+  syncChip:()=>{if(Sync.cfg.email&&(NATIVE||Sync.cfg.clientId)&&Sync.status!=='syncing'&&!tokenOk())runSync(true);else openSyncPanel()},
+  syncNow:()=>{if(!NATIVE&&!Sync.cfg.clientId){toast('Paste your Google Client ID first.','bad');const d=$('#modal details');if(d)d.open=true;return}closeModal();runSync(true)},
   syncAuto:()=>{Sync.cfg.auto=!Sync.cfg.auto;saveSyncCfg();openSyncPanel()},
   syncSaveClient:()=>{const v=($('#syncClient').value||'').trim();
     if(v&&!/^[\w-]+\.apps\.googleusercontent\.com$/.test(v)){toast('That doesn’t look like a Client ID. It ends with .apps.googleusercontent.com','bad');return}
     Sync.cfg.clientId=v;saveSyncCfg();toast(v?'Client ID saved':'Client ID removed');openSyncPanel()},
   syncSignOut:()=>confirmBox('Sign out of Google Drive?','Your data stays on this device and in Drive. Sync stops until you sign in again.',[{label:'Sign out',cls:'danger',fn:()=>{
     try{if(Sync.token&&window.google&&google.accounts)google.accounts.oauth2.revoke(Sync.token,()=>{})}catch(e){}
+    if(NATIVE&&Sync.token){const t=Sync.token;fetch('https://oauth2.googleapis.com/revoke?token='+encodeURIComponent(t),{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'}}).catch(()=>{});nativeDropToken()}
     Sync.token=null;Sync.cfg.email='';Sync.cfg.lastSync=0;saveSyncCfg();DC={};saveDC();setSyncStatus('setup');toast('Signed out')}}])
 });
 ensureSyncFields();
+if(NATIVE&&Sync.cfg.email&&Sync.cfg.auto)setTimeout(()=>runSync(false),2500);
 
 
 if(S.key.length!==S.cfg.q)fitKey();
