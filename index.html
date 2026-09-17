@@ -1665,14 +1665,16 @@ async function getToken(interactive){
   await loadGIS();
   return new Promise((res,rej)=>{
     const tc=google.accounts.oauth2.initTokenClient({client_id:Sync.cfg.clientId,scope:DRIVE_SCOPE,
-      callback:r=>{if(r.error){rej(new Error(r.error_description||r.error));return}Sync.token=r.access_token;Sync.tokenExp=Date.now()+(+r.expires_in||3600)*1000;res(r.access_token)},
+      callback:r=>{if(r.error){rej(new Error(r.error_description||r.error));return}if(!google.accounts.oauth2.hasGrantedAllScopes(r,'https://www.googleapis.com/auth/drive.file')){Sync.needConsent=true;rej(new Error('scope'));return}Sync.needConsent=false;Sync.token=r.access_token;Sync.tokenExp=Date.now()+(+r.expires_in||3600)*1000;res(r.access_token)},
       error_callback:e=>rej(new Error(e&&e.type==='popup_closed'?'Sign-in window was closed.':(e&&e.message)||'Sign-in failed'))});
-    tc.requestAccessToken({prompt:Sync.cfg.email?'':'consent',login_hint:Sync.cfg.email||EXPECTED_ACCOUNT});
+    tc.requestAccessToken({prompt:(Sync.cfg.email&&!Sync.needConsent)?'':'consent',login_hint:Sync.cfg.email||EXPECTED_ACCOUNT});
   });
 }
 async function gfetch(url,opt={},retry=true){
   const r=await fetch(url,Object.assign({},opt,{headers:Object.assign({Authorization:'Bearer '+Sync.token},opt.headers||{})}));
   if(r.status===401){Sync.token=null;throw new Error('signin')}
+  if(r.status===403&&/insufficient/i.test(r.headers.get('www-authenticate')||'')){Sync.token=null;Sync.needConsent=true;throw new Error('scope')}
+  if(r.status===403){const t=await r.clone().text();if(/insufficient authentication scopes|ACCESS_TOKEN_SCOPE_INSUFFICIENT/i.test(t)){Sync.token=null;Sync.needConsent=true;throw new Error('scope')}}
   if((r.status===429||r.status>=500)&&retry){await new Promise(z=>setTimeout(z,1500));return gfetch(url,opt,false)}
   return r;
 }
@@ -1794,6 +1796,7 @@ async function runSync(interactive){
     const m=String(e&&e.message||e);
     if(m==='signin'){setSyncStatus('signin')}
     else if(m==='noclient'){setSyncStatus('setup');if(interactive)openSyncPanel()}
+    else if(m==='scope'){Sync.err='Google Drive permission was not given.';setSyncStatus('signin');if(interactive)alertBox('Please allow Google Drive',['On the Google sign-in page, tick the box that says “See, edit, create, and delete only the specific Google Drive files you use with this app”.','Then tap Continue. Tap Sync now to try again.'],'warn')}
     else{Sync.err=m;setSyncStatus('error');if(interactive)alertBox('Sync didn’t finish',[m,'Your data is safe on this device. Try Sync now again in a moment.'],'warn')}
     if(/404/.test(m)){DC={};saveDC()}
   }finally{Sync.busy=false}
