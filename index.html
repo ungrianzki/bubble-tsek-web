@@ -120,6 +120,8 @@ h2{margin:0 0 10px;font-size:1.15rem;text-wrap:balance}
 .kgrid.compact{grid-template-columns:repeat(auto-fill,minmax(210px,1fr))}
 .kgrid.compact .bub{width:32px;height:32px;font-size:.8rem}
 /* table */
+.cellfill{cursor:pointer}
+.cellfill:hover{background:var(--surface2)}
 .tbl-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:12px}
 table{border-collapse:collapse;width:100%;font-size:.92rem}
 th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
@@ -253,7 +255,7 @@ const AV={u0:7,u1:183,v0:-3,v1:207};                         // usable answer ar
 const CODE={n:34,cw:3.2,x0:(190-34*3.2)/2};
 const VER={n:3,cw:3.2,x0:22};   // marker cell + 2 bits, left of the code strip (A=00, B=01). Missing = version A.
 const VLET='AB';
-const APP_VER='16';
+const APP_VER='18';
 /* ===== The teacher's ORIGINAL sheet (pre-Bubble Tsek form): 3-digit roll, 20 items, A–E, 3×5 grid of squares, no code strip.
    Measured from "answer sheet 20.pdf" (710×1010 px image, 0.19909 mm/px). Coordinates are mm from the top-left square's centre. */
 /* ===== The school's pre-printed sheets. Two families, both measured from the school's own PDFs:
@@ -770,10 +772,144 @@ const ICON={
   ext:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6m0-6-9 9M18 14v6H4V6h6"/></svg>'
 };
 
+
+/* ---------- section score report: every exam in the term, one column each ---------- */
+const byStudentName=(a,b)=>String(a&&a.name||'').localeCompare(String(b&&b.name||''),'en',{sensitivity:'base',numeric:true});
+function reportExams(classId){
+  return Object.values(LIB.exams||{})
+    .filter(x=>x&&x.data&&x.data.classId===classId)
+    .map(x=>({id:x.id,
+      name:(x.data.exam&&x.data.exam.name)||'Untitled exam',
+      date:(x.data.exam&&x.data.exam.date)||'',
+      max:x.data.cfg?Math.round(x.data.cfg.q*x.data.cfg.mc*100)/100:0,
+      at:x.updatedAt||0,rec:x}))
+    .sort((a,b)=>String(a.date).localeCompare(String(b.date))||a.at-b.at);
+}
+/* rollKey -> score, using each sheet's own version key */
+function examScoreMap(rec){
+  const d=rec&&rec.data,out={};
+  if(!d||!d.results||!d.cfg)return out;
+  Object.values(d.results).forEach(r=>{
+    if(!r||(!r.ans&&!r.manual))return;
+    if(!r.manual){const key=keyForRes(d,r);if(key.length<d.cfg.q)return}
+    const sc=resScore(r,d.cfg,keyForRes(d,r));
+    if(sc!==null)out[rollKey(r.roll)]={v:sc,manual:!!r.manual};
+  });
+  return out;
+}
+function reportData(){
+  const c=getClass(UI.classId);if(!c)return null;
+  UI.repHide=UI.repHide||{};
+  const all=reportExams(c.id);
+  const cols=all.filter(e=>!UI.repHide[e.id]).map(e=>Object.assign({},e,{sc:examScoreMap(e.rec)}));
+  const rows=[...c.students].sort(byStudentName).map(s=>({name:s.name,roll:s.roll,
+    scores:cols.map(e=>{const v=e.sc[rollKey(s.roll)];return v===undefined?null:v})}));
+  return {c:c,term:termOf(c.termId),all:all,cols:cols,rows:rows};
+}
+function reportView(){
+  const R=reportData();
+  if(!R){UI.view='classes';return classesView()}
+  const c=R.c,all=R.all,cols=R.cols,rows=R.rows;
+  const colStat=cols.map((e,ci)=>{const v=rows.map(r=>r.scores[ci]).filter(x=>x!==null).map(x=>x.v);
+    return {n:v.length,avg:v.length?v.reduce((a,b)=>a+b,0)/v.length:null}});
+  return `<section class="panel">
+  <div class="head"><p class="eyebrow"><a href="#" data-act="goClasses">My classes</a> › <a href="#" data-act="openClass" data-id="${c.id}">${esc(c.section)}</a> › Score report</p>
+    <h1>Score report</h1>
+    <p class="lede">${c.subject?esc(c.subject)+' · ':''}${esc(c.section)} · ${rows.length} student${rows.length===1?'':'s'} · ${all.length} exam${all.length===1?'':'s'}${R.term?' · '+esc(R.term.name):''}</p></div>
+  <div class="toolbar">
+    <button class="btn" data-act="openClass" data-id="${c.id}">${ICON.back} Back to class</button>
+    <button class="btn primary" data-act="repExcel"${cols.length?'':' disabled'}>${ICON.dl} Download Excel</button>
+  </div>
+  ${all.length?`<div class="card" style="margin-bottom:12px"><b>Show these exams</b>
+    <div style="display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:8px">
+    ${all.map(e=>`<label style="display:flex;gap:7px;align-items:center;cursor:pointer"><input type="checkbox" data-rep="${e.id}"${UI.repHide[e.id]?'':' checked'}> <span>${esc(e.name)}${e.date?' <span class="dim">'+esc(e.date)+'</span>':''}</span></label>`).join('')}
+    </div></div>`:''}
+  ${!all.length?'<p class="dim">No exams yet for this class.</p>':!cols.length?'<p class="dim">All exams are hidden. Tick one above to see scores.</p>':`
+  <div class="tbl-wrap" style="max-height:70vh"><table><thead><tr>
+    <th class="num">#</th><th>Roll no.</th><th>Student name</th>
+    ${cols.map(e=>`<th class="num">${esc(e.name)}<br><span class="dim" style="font-weight:400">(${fmt(e.max)})</span></th>`).join('')}
+  </tr></thead><tbody>
+  ${rows.map((r,i)=>`<tr><td class="num dim">${i+1}</td><td class="mono">${esc(r.roll)}</td><td>${esc(r.name)}</td>
+    ${r.scores.map((v,ci)=>`<td class="num cellfill" data-act="repCell" data-e="${cols[ci].id}" data-r="${esc(rollKey(r.roll))}" title="${v===null?'Type a score':(v.manual?'Typed in — tap to edit':'From a scanned sheet')}">${v===null?'<span class="dim">—</span>':(v.manual?`<b>${fmt(v.v)}</b><span class="dim" style="font-size:.78em"> ✎</span>`:`<b>${fmt(v.v)}</b>`)}</td>`).join('')}</tr>`).join('')}
+  </tbody><tfoot><tr><td></td><td></td><td class="dim">Scanned · average</td>
+    ${colStat.map(s=>`<td class="num dim">${s.n} / ${rows.length}<br>${s.avg===null?'—':fmt(Math.round(s.avg*100)/100)}</td>`).join('')}
+  </tr></tfoot></table></div>
+  <p class="dim" style="margin-top:8px">Tap any cell to type a score in by hand — for a paper answered without a bubble sheet. ✎ marks a typed-in score. A dash means nothing is recorded yet.</p>`}
+  </section>`;
+}
+function reportExcelBytes(){
+  const R=reportData();if(!R||!R.cols.length)return null;
+  const head=['ROLL NO','STUDENT NAME'].concat(R.cols.map(e=>e.name));
+  const maxRow=['MAX POINTS',''].concat(R.cols.map(e=>e.max));
+  const body=R.rows.map(r=>[r.roll,r.name].concat(r.scores.map(v=>v===null?'':v.v)));
+  const ws=XLSX.utils.aoa_to_sheet([head,maxRow].concat(body));
+  ws['!cols']=[{wch:10},{wch:34}].concat(R.cols.map(()=>({wch:13})));
+  const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Scores');
+  return XLSX.write(wb,{bookType:'xlsx',type:'array'});
+}
+document.addEventListener('change',e=>{
+  const t=e.target;if(!t||!t.dataset||!t.dataset.rep)return;
+  UI.repHide=UI.repHide||{};
+  if(t.checked)delete UI.repHide[t.dataset.rep];else UI.repHide[t.dataset.rep]=1;
+  render();
+});
+
+
+/* ---------- manual scores: a paper answered without a bubble sheet ---------- */
+const isManual=r=>!!(r&&r.manual);
+/* one place that knows how to score ANY saved result */
+function resScore(r,cfg,key){
+  if(!r)return null;
+  if(r.manual)return Math.round((+r.score||0)*100)/100;
+  if(!r.ans)return null;
+  return gradeWith(r.ans,cfg,key||[]).score;
+}
+const examMax=d=>d&&d.cfg?Math.round(d.cfg.q*d.cfg.mc*100)/100:0;
+const keyForRes=(d,r)=>((r&&r.ver===1&&d.keyB&&d.keyB.length)?d.keyB:d.key)||[];
+function recalcSummary(x){
+  const d=x.data,rs=Object.values(d.results||{});
+  const vals=rs.map(r=>resScore(r,d.cfg,keyForRes(d,r))).filter(v=>v!==null);
+  x.summary={n:vals.length,avg:vals.length?vals.reduce((a,b)=>a+b,0)/vals.length:0,max:examMax(d)};
+}
+/* write a manual score into the open exam (S) or into a stored one (LIB.exams) */
+function setManualScore(examId,roll,score){
+  if(examId===S.id){
+    const k=rk(roll);
+    S.results[k]={roll:k,manual:true,score:score,at:Date.now(),ver:0};
+    persist();
+  }else{
+    const x=LIB.exams[examId];if(!x)return;
+    const k=String(roll).padStart((x.data.cfg&&x.data.cfg.roll)||3,'0');
+    x.data.results[k]={roll:k,manual:true,score:score,at:Date.now(),ver:0};
+    recalcSummary(x);x.updatedAt=Date.now();libSave();
+  }
+}
+function clearManualScore(examId,roll){
+  if(examId===S.id){const k=rk(roll);if(isManual(S.results[k])){delete S.results[k];persist()}return}
+  const x=LIB.exams[examId];if(!x)return;
+  const k=String(roll).padStart((x.data.cfg&&x.data.cfg.roll)||3,'0');
+  if(isManual(x.data.results[k])){delete x.data.results[k];recalcSummary(x);x.updatedAt=Date.now();libSave()}
+}
+/* the little dialog, used from Results and from the report */
+function manualScoreDialog(o){
+  UI.manual=o;
+  const cur=o.current===null||o.current===undefined?'':fmt(o.current);
+  openModal(`<h2 style="margin-bottom:4px">${o.current===null?'Enter a score':'Edit the score'}</h2>
+  <p class="dim" style="margin:0 0 14px">${esc(o.name)} · ${esc(o.examName)} · out of ${fmt(o.max)}</p>
+  <div class="field"><label for="mScore">Score</label>
+    <input id="mScore" type="number" inputmode="decimal" min="0" max="${o.max}" step="any" value="${cur}" style="font-size:1.4rem;font-weight:700;max-width:160px">
+    <p class="help" id="mErr" hidden style="color:var(--bad)"></p>
+    <p class="help">For a paper answered without a bubble sheet. It counts in the totals and exports, but not in the item analysis.</p></div>
+  <div class="actions">${o.current===null?'':'<button class="btn danger" data-act="mClear">Remove score</button>'}
+    <button class="btn" data-act="closeModal">Cancel</button>
+    <button class="btn primary" data-act="mSave">${o.current===null?'Save score':'Save changes'}</button></div>`);
+  setTimeout(()=>{const el=$('#mScore');if(el){el.focus();el.select()}},50);
+}
+
 /* ================= render ================= */
 function render(){
   try{paintSyncChip()}catch(e){}
-  if(UI.view!=='exam'){camClose();$('#stepper').hidden=true;$('#ctx').innerHTML='';$('#main').innerHTML=UI.view==='class'?classView():UI.view==='bank'?itemBankView():UI.view==='qbanks'?banksView():UI.view==='qbank'?bankView():UI.view==='maketest'?makeTestView():classesView();persist();return}
+  if(UI.view!=='exam'){camClose();$('#stepper').hidden=true;$('#ctx').innerHTML='';$('#main').innerHTML=UI.view==='class'?classView():UI.view==='report'?reportView():UI.view==='bank'?itemBankView():UI.view==='qbanks'?banksView():UI.view==='qbank'?bankView():UI.view==='maketest'?makeTestView():classesView();persist();return}
   $('#stepper').hidden=false;syncClass();$('#ctx').innerHTML=ctxBar();
   if(S.step!==4)camClose();
   if(!canOpen(S.step)){let i=0;while(i<5&&stepDone(i))i++;S.step=Math.min(S.step,i)}
@@ -867,7 +1003,7 @@ function scanSide(){
   <div class="card"><small class="dim" style="display:block;margin-bottom:8px">Mark detection</small>
   <div class="seg" role="group" aria-label="Mark detection">${[[1,'Light marks'],[2,'Normal'],[3,'Strict']].map(([v,l])=>`<button class="${S.sens===v?'on':''}" data-act="sens" data-v="${v}">${l}</button>`).join('')}</div>
   <p class="help">Use “Light marks” for faint pencil or small X marks. Use “Strict” if erased marks are being counted.</p></div>
-  <div class="card"><small class="dim" style="display:block;margin-bottom:6px">Last saved</small>${recent.length?`<ul class="recent">${recent.map(r=>{const g=grade(r.ans),s=sm[r.roll];return `<li><span>${esc(s?s.name:r.roll)}</span><span class="mono">${fmt(g.score)}/${fmt(maxScore())}</span></li>`}).join('')}</ul>`:'<p class="dim" style="margin:0;font-size:.9rem">Nothing saved yet.</p>'}</div>`;
+  <div class="card"><small class="dim" style="display:block;margin-bottom:6px">Last saved</small>${recent.length?`<ul class="recent">${recent.map(r=>{const sc=resScore(r,S.cfg,keyOf(r.ver||0)),s=sm[r.roll];return `<li><span>${esc(s?s.name:r.roll)}</span><span class="mono">${sc===null?'—':fmt(sc)}/${fmt(maxScore())}</span></li>`}).join('')}</ul>`:'<p class="dim" style="margin:0;font-size:.9rem">Nothing saved yet.</p>'}</div>`;
 }
 
 /* ================= sounds ================= */
@@ -1034,7 +1170,7 @@ function resInfo(){
   const cur=UI.cur,g=grade(cur.ans),sm=studentMap(),validRoll=/^\d+$/.test(cur.roll),st=validRoll?sm[cur.roll]:null,prev=st&&S.results[cur.roll];
   let warn='';
   if(!st)warn=`<div class="alert bad"><b>${validRoll?`Roll number ${esc(cur.roll)} is not in the class list.`:'The roll number is missing or has more than one shade in a column.'}</b><br>This score can’t be saved. Tap <b>Edit</b> to fix the roll number, or discard it.</div>`;
-  else if(prev&&!(cur.autoSaved&&cur.roll===cur.savedRoll))warn=`<div class="alert warn">${esc(st.name)} already has a saved score of <b>${fmt(grade(prev.ans).score)}</b>. Saving will replace it.</div>`;
+  else if(prev&&!(cur.autoSaved&&cur.roll===cur.savedRoll))warn=`<div class="alert warn">${esc(st.name)} already has a ${isManual(prev)?'typed-in':'saved'} score of <b>${fmt(resScore(prev,S.cfg,keyOf(prev.ver||0)))}</b>. Saving will replace it.</div>`;
   const multiQ=cur.ans.map((a,i)=>a.length>1?i+1:0).filter(Boolean);
   if(cur.reasons&&cur.reasons.length)warn=`<div class="alert warn"><b>Auto-save paused for this sheet:</b> ${esc(cur.reasons.join('; '))}.</div>`+warn;
   else if(multiQ.length)warn+=`<div class="alert warn">Question${multiQ.length>1?'s':''} ${multiQ.join(', ')} ha${multiQ.length>1?'ve':'s'} 2+ answers and ${multiQ.length>1?'are':'is'} counted wrong. Tap <b>Edit</b> if the scan misread them.</div>`;
@@ -1084,14 +1220,16 @@ function scannerModal(title,lede,mode,expect,onCap){
 /* ================= results & analysis ================= */
 function stats(){
   const only=UI.verView;
-  let rows=S.students.map(s=>{const r=S.results[rk(s.roll)];return {s,r,g:r?grade(r.ans,r.ver||0):null}});
+  let rows=S.students.map(s=>{const r=S.results[rk(s.roll)];
+    return {s,r,g:!r?null:(r.manual?{score:Math.round((+r.score||0)*100)/100,manual:true,c:null,w:null,b:null,m:0,items:[]}:grade(r.ans,r.ver||0))}});
   if(only!=null&&versCount()>1)rows=rows.filter(x=>x.r&&(x.r.ver||0)===only);
   const done=rows.filter(x=>x.g);
+  const scanned=done.filter(x=>!x.g.manual);
   const sc=done.map(x=>x.g.score).sort((a,b)=>a-b),n=sc.length;
-  return {rows,done,n,mean:n?sc.reduce((a,b)=>a+b,0)/n:0,hi:n?sc[n-1]:0,lo:n?sc[0]:0,med:n?(n%2?sc[(n-1)/2]:(sc[n/2-1]+sc[n/2])/2):0};
+  return {rows,done,scanned,n,mean:n?sc.reduce((a,b)=>a+b,0)/n:0,hi:n?sc[n-1]:0,lo:n?sc[0]:0,med:n?(n%2?sc[(n-1)/2]:(sc[n/2-1]+sc[n/2])/2):0};
 }
 function itemStats(){
-  const st=stats(),done=[...st.done].sort((a,b)=>b.g.score-a.g.score),n=done.length,k=Math.max(1,Math.round(n*.27));
+  const st=stats(),done=[...st.scanned].sort((a,b)=>b.g.score-a.g.score),n=done.length,k=Math.max(1,Math.round(n*.27));
   const up=done.slice(0,k),low=done.slice(-k);
   return Array.from({length:S.cfg.q},(_,i)=>{
     const cnt=Array(S.cfg.opt).fill(0);let blank=0,multi=0,right=0;
@@ -1108,8 +1246,9 @@ const pct=(a,b)=>b?Math.round(a/b*100)+'%':'—';
 function scoresTable(st){
   return `<div class="tbl-wrap"><table><thead><tr><th class="num">#</th><th>Roll no.</th><th>Student name</th>${versCount()>1?'<th class="c">Ver</th>':''}<th class="num">Score</th><th class="num">%</th><th class="num">Correct</th><th class="num">Wrong</th><th class="num">Blank</th><th>Status</th><th></th></tr></thead><tbody>
   ${st.rows.map((x,i)=>`<tr><td class="num dim">${i+1}</td><td class="mono">${esc(rk(x.s.roll))}</td><td>${esc(x.s.name)}</td>${versCount()>1?`<td class="c">${x.r?VLET[x.r.ver||0]:''}</td>`:''}
-  ${x.g?`<td class="num"><b>${fmt(x.g.score)}</b></td><td class="num">${pct(x.g.score,maxScore())}</td><td class="num">${x.g.c}</td><td class="num">${x.g.w}</td><td class="num">${x.g.b}</td><td><span class="pill ok">Scanned</span></td><td style="white-space:nowrap"><button class="btn small" data-act="viewPic" data-r="${esc(rk(x.s.roll))}">Sheet</button> <button class="btn small danger" data-act="delRes" data-r="${esc(rk(x.s.roll))}">Remove</button></td>`
-  :`<td class="num dim">—</td><td></td><td></td><td></td><td></td><td><span class="pill">Not scanned</span></td><td></td>`}</tr>`).join('')}</tbody></table></div>`;
+  ${x.g&&x.g.manual?`<td class="num"><b>${fmt(x.g.score)}</b></td><td class="num">${pct(x.g.score,maxScore())}</td><td class="num dim">—</td><td class="num dim">—</td><td class="num dim">—</td><td><span class="pill warn">Typed in</span></td><td style="white-space:nowrap"><button class="btn small" data-act="manualRes" data-r="${esc(rk(x.s.roll))}">Edit</button></td>`
+  :x.g?`<td class="num"><b>${fmt(x.g.score)}</b></td><td class="num">${pct(x.g.score,maxScore())}</td><td class="num">${x.g.c}</td><td class="num">${x.g.w}</td><td class="num">${x.g.b}</td><td><span class="pill ok">Scanned</span></td><td style="white-space:nowrap"><button class="btn small" data-act="viewPic" data-r="${esc(rk(x.s.roll))}">Sheet</button> <button class="btn small danger" data-act="delRes" data-r="${esc(rk(x.s.roll))}">Remove</button></td>`
+  :`<td class="num dim">—</td><td></td><td></td><td></td><td></td><td><span class="pill">Not scanned</span></td><td style="text-align:right"><button class="btn small" data-act="manualRes" data-r="${esc(rk(x.s.roll))}">Enter score</button></td>`}</tr>`).join('')}</tbody></table></div>`;
 }
 function studentAnalysis(st,forReport){
   const q=S.cfg.q;const cls={C:'cell-c',W:'cell-w',B:'cell-b',M:'cell-m'};
@@ -1158,7 +1297,9 @@ function resultsView(){
 function excelBytes(){
   const q=S.cfg.q,V=versCount()>1,head=['ROLL NO','STUDENT NAME',((S.exam.name||'').trim()+' SCORE').trim().toUpperCase(),...(V?['VERSION']:[]),...Array.from({length:q},(_,i)=>'QUESTION '+(i+1))];
   const rows=S.students.map(s=>{const r=S.results[rk(s.roll)],roll=/^0/.test(s.roll)?s.roll:Number(s.roll);
-    if(!r)return [roll,s.name,'',...(V?['']:[]),...Array(q).fill('')];const g=grade(r.ans,r.ver||0);return [roll,s.name,g.score,...(V?[VLET[r.ver||0]]:[]),...g.items.map(t=>t==='C'?'OK':'X')]});
+    if(!r)return [roll,s.name,'',...(V?['']:[]),...Array(q).fill('')];
+    if(isManual(r))return [roll,s.name,Math.round((+r.score||0)*100)/100,...(V?['']:[]),...Array(q).fill('')];
+    const g=grade(r.ans,r.ver||0);return [roll,s.name,g.score,...(V?[VLET[r.ver||0]]:[]),...g.items.map(t=>t==='C'?'OK':'X')]});
   const ws=XLSX.utils.aoa_to_sheet([head,...rows]);
   ws['!cols']=[{wch:10},{wch:33.57},{wch:15},...(V?[{wch:9}]:[]),...Array(q).fill({wch:11.57})];
   const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'results');
@@ -1337,7 +1478,8 @@ function examSnapshot(){const d={};EXAM_KEYS.forEach(k=>d[k]=S[k]);return JSON.p
 function libSaveExam(){
   if(!LIB||!S.id)return;
   const rs=Object.values(S.results||{}),max=S.cfg.q*S.cfg.mc;
-  const avg=rs.length?rs.reduce((a,r)=>a+gradeWith(r.ans,S.cfg,(r.ver===1&&S.keyB&&S.keyB.length?S.keyB:S.key)).score,0)/rs.length:0;
+  const sv=rs.map(r=>resScore(r,S.cfg,(r.ver===1&&S.keyB&&S.keyB.length?S.keyB:S.key))).filter(v=>v!==null);
+  const avg=sv.length?sv.reduce((a,b)=>a+b,0)/sv.length:0;
   const has=rs.length||S.exam.name.trim()||S.sheetReady;
   if(!has&&!LIB.exams[S.id])return;
   LIB.exams[S.id]={id:S.id,data:examSnapshot(),updatedAt:Date.now(),summary:{n:rs.length,avg,max}};
@@ -1475,6 +1617,7 @@ function classView(){
     <button class="btn" data-act="pickClassCsv">${ICON.up} Upload student list</button>
     <button class="btn" data-act="addStudent">+ Add student</button>
     <button class="btn" data-act="editClass">Edit name / subject</button>`}
+    ${NATIVE?'':`<button class="btn" data-act="openReport" data-id="${c.id}">Score report</button>`}
     <button class="btn danger" data-act="delClass">Delete class</button>
   </div>
   <h2 class="grp-h">Exams <span class="dim" style="font-weight:400;font-size:.9rem">${ex.length}</span></h2>
@@ -1656,6 +1799,28 @@ Object.assign(ACT,{
   backToExam:()=>{UI.view='exam';render();window.scrollTo({top:0})},
   openClass:b=>{persist();UI.classId=b.dataset.id;UI.view='class';render();window.scrollTo({top:0})},
   openExam:b=>openExam(b.dataset.id),
+  mSave:()=>{const o=UI.manual;if(!o)return;
+    const el=$('#mScore'),raw=String(el?el.value:'').trim(),v=Number(raw),err=$('#mErr');
+    const bad=raw===''?'Type a score first.':(!isFinite(v)?'That is not a number.':(v<0?'A score cannot be less than 0.':(v>o.max?'That is more than the '+fmt(o.max)+' points this exam is out of.':'')));
+    if(bad){if(err){err.textContent=bad;err.hidden=false}return}
+    setManualScore(o.examId,o.roll,Math.round(v*100)/100);closeModal();
+    toast('Score saved: '+esc(o.name)+' '+fmt(Math.round(v*100)/100)+'/'+fmt(o.max));render()},
+  mClear:()=>{const o=UI.manual;if(!o)return;clearManualScore(o.examId,o.roll);closeModal();render()},
+  manualRes:b=>{const roll=b.dataset.r,st=studentMap()[roll],r=S.results[roll];
+    manualScoreDialog({examId:S.id,roll:roll,name:st?st.name:roll,examName:S.exam.name||'This exam',
+      max:maxScore(),current:isManual(r)?(+r.score||0):null})},
+  repCell:b=>{const x=LIB.exams[b.dataset.e];if(!x)return;
+    const c=getClass(UI.classId),st=(c?c.students:[]).find(s=>rollKey(s.roll)===b.dataset.r);
+    const k=Object.keys(x.data.results||{}).find(kk=>rollKey(kk)===b.dataset.r);
+    const r=k?x.data.results[k]:null;
+    if(r&&!isManual(r)){toast('That score came from a scanned sheet. Open the exam to change it.');return}
+    manualScoreDialog({examId:x.id,roll:st?st.roll:b.dataset.r,name:st?st.name:b.dataset.r,
+      examName:(x.data.exam&&x.data.exam.name)||'Exam',max:examMax(x.data),
+      current:r?(+r.score||0):null})},
+  openReport:b=>{persist();UI.classId=b.dataset.id;UI.view='report';UI.repHide={};render();window.scrollTo({top:0})},
+  repExcel:()=>{const R=reportData();if(!R||!R.cols.length)return;
+    const bytes=reportExcelBytes();if(!bytes)return;
+    shareOrSave(safeName((R.c.section||'CLASS')+' scores '+today())+'.xlsx',bytes,XLSX_MIME,'Score report')},
   delExam:b=>{const id=b.dataset.id,x=LIB.exams[id];confirmBox('Delete this exam?',`“${esc(x.data.exam.name||'Untitled exam')}” and its ${x.summary.n} saved score${x.summary.n===1?'':'s'} and pictures will be deleted from this device.`,[{label:'Delete exam',cls:'danger',fn:()=>{
     delete LIB.exams[id];PicDB.delPrefix(id+'|').catch(()=>{});libSave();if(id===S.id){S=newExamState(null)}render();toast('Exam deleted')}}])},
   newExam:()=>{
@@ -1810,7 +1975,8 @@ function libSaveExam(){
   const has=rs.length||S.exam.name.trim()||S.sheetReady;
   if(!has&&!old)return;
   if(old&&sig(old.data)===sig(data)){old.data.step=data.step;old.data.tab=data.tab;LIB.curExam=S.id;try{localStorage.setItem(LIB_KEY,JSON.stringify(LIB))}catch(e){}return}
-  const avg=rs.length?rs.reduce((a,r)=>a+gradeWith(r.ans,S.cfg,(r.ver===1&&S.keyB&&S.keyB.length?S.keyB:S.key)).score,0)/rs.length:0;
+  const sv=rs.map(r=>resScore(r,S.cfg,(r.ver===1&&S.keyB&&S.keyB.length?S.keyB:S.key))).filter(v=>v!==null);
+  const avg=sv.length?sv.reduce((a,b)=>a+b,0)/sv.length:0;
   LIB.exams[S.id]={id:S.id,data,updatedAt:Date.now(),summary:{n:rs.length,avg,max}};
   LIB.curExam=S.id;libSave();
 }
@@ -1996,7 +2162,7 @@ function buildLookupIndex(){
     const byRoll={};c.students.forEach(s=>{byRoll[String(s.roll).padStart(d.cfg.roll,'0')]=s});
     Object.values(d.results).forEach(r=>{const st=byRoll[r.roll];const k=x.id+'|'+rollKey(r.roll);
       out.push({term:t?t.name:'',subject:c.subject,section:c.section,exam:d.exam.name,date:d.exam.date,name:st?st.name:'',roll:r.roll,
-        score:gradeWith(r.ans,d.cfg,((r.ver===1&&d.keyB&&d.keyB.length)?d.keyB:d.key)).score,maxScore:d.cfg.q*d.cfg.mc,fileId:LIB.drivePics[k]?LIB.drivePics[k].id:null,updatedAt:r.at||x.updatedAt})})});
+        score:resScore(r,d.cfg,keyForRes(d,r)),maxScore:d.cfg.q*d.cfg.mc,fileId:LIB.drivePics[k]?LIB.drivePics[k].id:null,updatedAt:r.at||x.updatedAt})})});
   return {generatedAt:new Date().toISOString(),account:Sync.cfg.email,entries:out};
 }
 
