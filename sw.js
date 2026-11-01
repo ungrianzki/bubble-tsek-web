@@ -1,5 +1,5 @@
 // Bubble Tsek offline support. Change VERSION when you upload new files.
-const VERSION = 'bubbletsek-v18';
+const VERSION = 'bubbletsek-v20';
 const FILES = [
   './', './index.html', './manifest.webmanifest',
   './lib/xlsx.full.min.js', './lib/jspdf.umd.min.js', './lib/exceljs.min.js', './fonts/fonts.css',
